@@ -1,0 +1,653 @@
+# ============================================================
+# BUSINESS GLOSSARY - BHX Data Analyst Agent
+# ============================================================
+# Format chuẩn để load vào Vector DB (ChromaDB / FAISS)
+# Mỗi entry = 1 document được embed & retrieve theo semantic similarity
+#
+# Schema tham chiếu:
+#   customers    : customer_id, customer_name, gender, city, segment
+#   products     : product_id, product_name, category
+#   promotions   : promotionid, promotionname, promotiontype, fromdate, todate,
+#                  promotiongifttype, discountvalue, productid, categoryid, quantity, giftproductid
+#   sales_orders : sale_id, customer_id, product_id, quantity, unit_price,
+#                  gross_revenue, total_discount, net_revenue, is_gift,
+#                  promotionid, outputdate, outputtype
+# ============================================================
+
+terms:
+
+  # ─────────────────────────────────────────
+  # NHÓM 1: DOANH THU (Revenue Metrics)
+  # ─────────────────────────────────────────
+
+  - id: DTT
+    term: "Doanh thu thuần"
+    aliases:
+      - "net revenue"
+      - "doanh thu net"
+      - "DTT"
+      - "doanh thu thực"
+      - "doanh thu sau chiết khấu"
+    category: metric
+    definition: >
+      Tổng doanh thu thực tế sau khi đã trừ toàn bộ chiết khấu và giảm giá.
+      Đây là chỉ số phản ánh doanh thu công ty thực sự nhận được.
+      Công thức: Doanh thu gộp - Tổng chiết khấu.
+    sql_formula: "SUM(so.net_revenue)"
+    tables_involved: ["sales_orders"]
+    sql_note: "Dùng cột net_revenue trong bảng sales_orders. Mặc định loại trừ đơn hàng is_gift=1 nếu chỉ muốn đơn hàng thực tế."
+    example_questions:
+      - "Doanh thu thuần tháng này là bao nhiêu?"
+      - "So sánh doanh thu net giữa online và offline"
+      - "DTT theo ngành hàng"
+
+  - id: DTG
+    term: "Doanh thu gộp"
+    aliases:
+      - "gross revenue"
+      - "doanh thu brut"
+      - "DTG"
+      - "doanh thu trước chiết khấu"
+      - "tổng doanh thu"
+    category: metric
+    definition: >
+      Tổng doanh thu trước khi áp dụng bất kỳ chiết khấu nào.
+      Công thức: quantity × unit_price.
+    sql_formula: "SUM(so.gross_revenue)"
+    tables_involved: ["sales_orders"]
+    sql_note: "Dùng cột gross_revenue trong bảng sales_orders."
+    example_questions:
+      - "Doanh thu gộp theo tháng?"
+      - "Tổng gross revenue quý này?"
+
+  - id: CK
+    term: "Chiết khấu"
+    aliases:
+      - "discount"
+      - "giảm giá"
+      - "tổng giảm giá"
+      - "total discount"
+      - "mức chiết khấu"
+    category: metric
+    definition: >
+      Tổng số tiền giảm giá được áp dụng cho đơn hàng từ các chương trình khuyến mãi.
+      Bằng gross_revenue - net_revenue.
+    sql_formula: "SUM(so.total_discount)"
+    tables_involved: ["sales_orders"]
+    sql_note: "Dùng cột total_discount trong bảng sales_orders."
+    example_questions:
+      - "Tổng chiết khấu theo chương trình khuyến mãi nào là cao nhất?"
+      - "Mức discount trung bình mỗi đơn hàng?"
+
+  - id: TLCK
+    term: "Tỷ lệ chiết khấu"
+    aliases:
+      - "discount rate"
+      - "tỷ lệ giảm giá"
+      - "discount %"
+      - "mức chiết khấu phần trăm"
+    category: metric
+    definition: >
+      Phần trăm chiết khấu so với doanh thu gộp.
+      Công thức: (total_discount / gross_revenue) × 100.
+      Dùng để đánh giá mức độ hào phóng của chương trình khuyến mãi.
+    sql_formula: "ROUND(SUM(so.total_discount) * 100.0 / NULLIF(SUM(so.gross_revenue), 0), 2)"
+    tables_involved: ["sales_orders"]
+    sql_note: "Dùng NULLIF để tránh chia cho 0."
+    example_questions:
+      - "Tỷ lệ chiết khấu trung bình theo ngành hàng?"
+      - "Chương trình nào có discount rate cao nhất?"
+
+  - id: AOV
+    term: "Giá trị đơn hàng trung bình"
+    aliases:
+      - "AOV"
+      - "average order value"
+      - "giá trị trung bình mỗi đơn"
+      - "đơn hàng trung bình"
+    category: metric
+    definition: >
+      Doanh thu thuần trung bình tính trên mỗi đơn hàng.
+      Công thức: Tổng net_revenue / Số đơn hàng.
+      Không tính các đơn hàng quà tặng (is_gift = 1).
+    sql_formula: "ROUND(AVG(so.net_revenue), 0)"
+    tables_involved: ["sales_orders"]
+    sql_note: "Nên thêm WHERE is_gift = 0 để loại trừ đơn quà tặng khỏi tính toán AOV."
+    example_questions:
+      - "AOV của khách VIP so với khách thường?"
+      - "Giá trị đơn hàng trung bình theo kênh bán hàng?"
+
+  # ─────────────────────────────────────────
+  # NHÓM 2: KHÁCH HÀNG (Customer Segments)
+  # ─────────────────────────────────────────
+
+  - id: KH_VIP
+    term: "Khách hàng VIP"
+    aliases:
+      - "khách VIP"
+      - "VIP customer"
+      - "khách hàng thân thiết"
+      - "loyal customer"
+      - "KH VIP"
+    category: dimension
+    definition: >
+      Nhóm khách hàng có giá trị cao nhất, được phân loại segment = 'VIP' trong hệ thống.
+      Đây là nhóm khách hàng mang lại doanh thu lớn và có tần suất mua hàng cao.
+    sql_filter: "c.segment = 'VIP'"
+    tables_involved: ["customers"]
+    sql_note: "Giá trị chính xác trong cột segment là 'VIP' (viết hoa toàn bộ)."
+    example_questions:
+      - "Doanh thu từ khách VIP chiếm bao nhiêu % tổng doanh thu?"
+      - "Khách VIP mua ngành hàng nào nhiều nhất?"
+
+  - id: KH_MOI
+    term: "Khách hàng mới"
+    aliases:
+      - "new customer"
+      - "khách mới"
+      - "KH mới"
+      - "tân khách"
+      - "khách lần đầu"
+    category: dimension
+    definition: >
+      Nhóm khách hàng có segment = 'NEW' trong hệ thống.
+      Là khách hàng có đơn hàng đầu tiên xuất hiện gần đây.
+      Khi phân tích acquisition, dùng segment = 'NEW'.
+      Khi cần tìm theo ngày, lấy khách có min(outputdate) trong 30 ngày gần nhất.
+    sql_filter: "c.segment = 'NEW'"
+    tables_involved: ["customers", "sales_orders"]
+    sql_note: >
+      Cách 1 (dùng segment): c.segment = 'NEW'
+      Cách 2 (dùng ngày đầu tiên mua):
+        customer_id IN (SELECT customer_id FROM sales_orders
+                        GROUP BY customer_id
+                        HAVING MIN(outputdate) >= DATE('now', '-30 days'))
+    example_questions:
+      - "Có bao nhiêu khách hàng mới trong tháng này?"
+      - "Doanh thu từ khách hàng mới theo tháng?"
+
+  - id: KH_THUONG
+    term: "Khách hàng thường"
+    aliases:
+      - "khách thường"
+      - "normal customer"
+      - "NORMAL"
+      - "khách hàng bình thường"
+    category: dimension
+    definition: >
+      Nhóm khách hàng phổ thông, không thuộc VIP hoặc NEW.
+      Segment = 'NORMAL' trong hệ thống.
+    sql_filter: "c.segment = 'NORMAL'"
+    tables_involved: ["customers"]
+    sql_note: "Giá trị chính xác là 'NORMAL' (viết hoa)."
+    example_questions:
+      - "So sánh doanh thu giữa khách VIP, Normal và New?"
+
+  - id: TANSUATMUA
+    term: "Tần suất mua hàng"
+    aliases:
+      - "purchase frequency"
+      - "số lần mua"
+      - "tần suất"
+      - "frequency"
+    category: metric
+    definition: >
+      Số lần mua hàng trung bình của một khách hàng trong một khoảng thời gian.
+      Công thức: COUNT(sale_id) / COUNT(DISTINCT customer_id).
+    sql_formula: "COUNT(so.sale_id) * 1.0 / COUNT(DISTINCT so.customer_id)"
+    tables_involved: ["sales_orders"]
+    sql_note: "Nên GROUP BY customer_id rồi tính AVG."
+    example_questions:
+      - "Tần suất mua hàng trung bình của khách VIP?"
+      - "Khách hàng mua bao nhiêu lần trong 1 tháng?"
+
+  # ─────────────────────────────────────────
+  # NHÓM 3: KHUYẾN MÃI (Promotions)
+  # ─────────────────────────────────────────
+
+  - id: KM_GIAMGIA
+    term: "Khuyến mãi giảm giá"
+    aliases:
+      - "discount promotion"
+      - "promo giảm giá"
+      - "khuyến mãi chiết khấu"
+      - "promotion type 1"
+    category: dimension
+    definition: >
+      Chương trình khuyến mãi dạng giảm giá trực tiếp trên sản phẩm.
+      Được định nghĩa bởi promotiontype = 1 trong bảng promotions.
+      Bao gồm hai hình thức: giảm giá cố định (promotiongifttype=1)
+      và giảm giá theo % (promotiongifttype=2).
+    sql_filter: "p.promotiontype = 1"
+    tables_involved: ["promotions"]
+    sql_note: >
+      promotiontype = 1: Discount Promo (giảm giá)
+      promotiontype = 2: Gift Promo (tặng quà kèm)
+    example_questions:
+      - "Có bao nhiêu đơn hàng áp dụng khuyến mãi giảm giá?"
+      - "Doanh thu từ các chương trình khuyến mãi giảm giá?"
+
+  - id: KM_QUATANG
+    term: "Khuyến mãi tặng quà"
+    aliases:
+      - "gift promotion"
+      - "promo quà tặng"
+      - "tặng kèm"
+      - "gift promo"
+      - "promotion type 2"
+    category: dimension
+    definition: >
+      Chương trình khuyến mãi dạng tặng sản phẩm kèm theo khi mua đủ điều kiện.
+      Được định nghĩa bởi promotiontype = 2 trong bảng promotions.
+      Có promotiongifttype = 3 và có giftproductid.
+    sql_filter: "p.promotiontype = 2"
+    tables_involved: ["promotions"]
+    sql_note: "Đơn hàng quà tặng được đánh dấu is_gift = 1 trong sales_orders."
+    example_questions:
+      - "Bao nhiêu sản phẩm quà tặng đã được tặng kèm?"
+      - "Chương trình tặng quà nào phổ biến nhất?"
+
+  - id: GIAM_COSOGIAM
+    term: "Giảm giá cố định"
+    aliases:
+      - "fixed amount discount"
+      - "giảm giá số tiền"
+      - "giảm theo tiền"
+      - "promotiongifttype 1"
+    category: dimension
+    definition: >
+      Hình thức giảm giá theo số tiền VND cố định (ví dụ: giảm 5.000đ, 10.000đ, 15.000đ).
+      Được định nghĩa bởi promotiongifttype = 1 trong bảng promotions.
+      discountvalue là số tiền giảm tuyệt đối (đơn vị: đồng).
+    sql_filter: "p.promotiongifttype = 1"
+    tables_involved: ["promotions"]
+    sql_note: "discountvalue đơn vị là VND. VD: discountvalue=5000 tức giảm 5.000đ."
+    example_questions:
+      - "Chương trình giảm giá cố định nào có mức giảm cao nhất?"
+
+  - id: GIAM_PHANTRAM
+    term: "Giảm giá theo phần trăm"
+    aliases:
+      - "percentage discount"
+      - "giảm %"
+      - "giảm theo %"
+      - "promotiongifttype 2"
+    category: dimension
+    definition: >
+      Hình thức giảm giá theo tỷ lệ phần trăm (ví dụ: giảm 5%, 10%, 15%).
+      Được định nghĩa bởi promotiongifttype = 2 trong bảng promotions.
+      discountvalue là số % giảm (VD: 15 tức giảm 15%).
+    sql_filter: "p.promotiongifttype = 2"
+    tables_involved: ["promotions"]
+    sql_note: "discountvalue là số nguyên đại diện cho %. VD: discountvalue=15 tức giảm 15%."
+    example_questions:
+      - "Các chương trình giảm giá theo % áp dụng cho ngành hàng nào?"
+
+  - id: DON_COKM
+    term: "Đơn hàng có khuyến mãi"
+    aliases:
+      - "promoted orders"
+      - "đơn áp dụng KM"
+      - "đơn có promo"
+      - "đơn hàng khuyến mãi"
+    category: filter
+    definition: >
+      Các đơn hàng đã áp dụng ít nhất một chương trình khuyến mãi.
+      Được xác định bởi promotionid IS NOT NULL trong bảng sales_orders.
+    sql_filter: "so.promotionid IS NOT NULL"
+    tables_involved: ["sales_orders"]
+    sql_note: "Phân biệt với is_gift=1 (là sản phẩm quà tặng được tặng kèm)."
+    example_questions:
+      - "Doanh thu từ đơn hàng có và không có khuyến mãi?"
+      - "Tỷ lệ đơn hàng áp dụng khuyến mãi theo tháng?"
+
+  - id: DON_QUATANG
+    term: "Đơn hàng quà tặng"
+    aliases:
+      - "gift item"
+      - "sản phẩm tặng kèm"
+      - "hàng tặng"
+      - "is_gift"
+    category: filter
+    definition: >
+      Các dòng đơn hàng là sản phẩm quà tặng được tặng kèm từ chương trình khuyến mãi Gift Promo.
+      Được đánh dấu bởi is_gift = 1 trong bảng sales_orders.
+      Các đơn này có net_revenue = 0 và không tính vào doanh thu thực tế.
+    sql_filter: "so.is_gift = 1"
+    tables_involved: ["sales_orders"]
+    sql_note: >
+      Khi tính doanh thu thực, PHẢI loại trừ is_gift = 1:
+      WHERE is_gift = 0
+    example_questions:
+      - "Có bao nhiêu sản phẩm quà tặng được phát ra?"
+      - "Giá trị sản phẩm quà tặng theo chương trình?"
+
+  - id: HQKM
+    term: "Hiệu quả khuyến mãi"
+    aliases:
+      - "promotion effectiveness"
+      - "ROI khuyến mãi"
+      - "hiệu suất KM"
+    category: metric
+    definition: >
+      Đo lường mức độ hiệu quả của chương trình khuyến mãi.
+      So sánh doanh thu thuần (net_revenue) của đơn có KM vs không có KM.
+      Hoặc đo bằng: Doanh thu tăng thêm / Chi phí chiết khấu.
+    sql_formula: >
+      SELECT
+        CASE WHEN promotionid IS NOT NULL THEN 'Có KM' ELSE 'Không KM' END AS promotion_status,
+        COUNT(*) AS so_don,
+        ROUND(AVG(net_revenue), 0) AS aov,
+        SUM(net_revenue) AS tong_doanh_thu
+      FROM sales_orders WHERE is_gift = 0
+      GROUP BY promotion_status
+    tables_involved: ["sales_orders", "promotions"]
+    sql_note: "Luôn loại trừ is_gift=1 khi phân tích hiệu quả."
+    example_questions:
+      - "Đơn hàng có khuyến mãi có doanh thu trung bình cao hơn không?"
+      - "So sánh AOV giữa đơn có KM và không có KM?"
+
+  # ─────────────────────────────────────────
+  # NHÓM 4: KÊNH BÁN HÀNG (Sales Channel)
+  # ─────────────────────────────────────────
+
+  - id: KENH_OFFLINE
+    term: "Kênh offline"
+    aliases:
+      - "offline"
+      - "cửa hàng"
+      - "bán tại cửa hàng"
+      - "in-store"
+      - "mua trực tiếp"
+    category: dimension
+    definition: >
+      Kênh bán hàng tại cửa hàng vật lý.
+      Được định nghĩa bởi outputtype = 'offline' trong bảng sales_orders.
+    sql_filter: "so.outputtype = 'offline'"
+    tables_involved: ["sales_orders"]
+    sql_note: "Giá trị chính xác là 'offline' (chữ thường)."
+    example_questions:
+      - "Doanh thu kênh offline theo tháng?"
+      - "Ngành hàng nào bán chạy nhất qua kênh offline?"
+
+  - id: KENH_ONLINE
+    term: "Kênh online"
+    aliases:
+      - "online"
+      - "thương mại điện tử"
+      - "ecommerce"
+      - "mua online"
+      - "đặt hàng online"
+    category: dimension
+    definition: >
+      Kênh bán hàng qua nền tảng trực tuyến (app, website).
+      Được định nghĩa bởi outputtype = 'online' trong bảng sales_orders.
+    sql_filter: "so.outputtype = 'online'"
+    tables_involved: ["sales_orders"]
+    sql_note: "Giá trị chính xác là 'online' (chữ thường)."
+    example_questions:
+      - "Tỷ trọng doanh thu online vs offline?"
+      - "Kênh nào tăng trưởng nhanh hơn trong quý vừa rồi?"
+
+  # ─────────────────────────────────────────
+  # NHÓM 5: NGÀNH HÀNG (Product Categories)
+  # ─────────────────────────────────────────
+
+  - id: NGANH_GIADUNG
+    term: "Ngành hàng gia dụng"
+    aliases:
+      - "gia dụng"
+      - "Gia_dung"
+      - "household"
+      - "đồ gia dụng"
+    category: dimension
+    definition: "Ngành hàng đồ dùng gia đình. Giá trị category = 'Gia_dung' trong bảng products."
+    sql_filter: "p.category = 'Gia_dung'"
+    tables_involved: ["products"]
+    sql_note: "Giá trị chính xác: 'Gia_dung' (có dấu gạch dưới, G viết hoa)."
+    example_questions:
+      - "Doanh thu ngành gia dụng tháng này?"
+
+  - id: NGANH_THUCPHAM
+    term: "Ngành hàng thực phẩm"
+    aliases:
+      - "thực phẩm"
+      - "Thuc_pham"
+      - "food"
+      - "đồ ăn"
+      - "thức ăn"
+    category: dimension
+    definition: "Ngành hàng thực phẩm, đồ ăn. Giá trị category = 'Thuc_pham' trong bảng products."
+    sql_filter: "p.category = 'Thuc_pham'"
+    tables_involved: ["products"]
+    sql_note: "Giá trị chính xác: 'Thuc_pham' (không dấu, có gạch dưới, T viết hoa)."
+    example_questions:
+      - "Top sản phẩm thực phẩm bán chạy nhất?"
+
+  - id: NGANH_DOUONG
+    term: "Ngành hàng đồ uống"
+    aliases:
+      - "đồ uống"
+      - "Do_uong"
+      - "beverage"
+      - "nước uống"
+      - "thức uống"
+    category: dimension
+    definition: "Ngành hàng đồ uống, nước giải khát. Giá trị category = 'Do_uong' trong bảng products."
+    sql_filter: "p.category = 'Do_uong'"
+    tables_involved: ["products"]
+    sql_note: "Giá trị chính xác: 'Do_uong'."
+    example_questions:
+      - "Doanh thu ngành đồ uống theo kênh?"
+
+  - id: NGANH_MEBE
+    term: "Ngành hàng mẹ và bé"
+    aliases:
+      - "mẹ và bé"
+      - "mẹ bé"
+      - "Me_Be"
+      - "mother & baby"
+      - "baby"
+      - "trẻ em"
+    category: dimension
+    definition: "Ngành hàng sản phẩm dành cho mẹ và trẻ em. Giá trị category = 'Me_Be' trong bảng products."
+    sql_filter: "p.category = 'Me_Be'"
+    tables_involved: ["products"]
+    sql_note: "Giá trị chính xác: 'Me_Be'."
+    example_questions:
+      - "Khách hàng mua ngành mẹ và bé thuộc phân khúc nào nhiều nhất?"
+
+  - id: NGANH_DIENTU
+    term: "Ngành hàng điện tử"
+    aliases:
+      - "điện tử"
+      - "Dien_tu"
+      - "electronics"
+      - "thiết bị điện tử"
+      - "đồ điện"
+    category: dimension
+    definition: "Ngành hàng thiết bị điện tử, công nghệ. Giá trị category = 'Dien_tu' trong bảng products."
+    sql_filter: "p.category = 'Dien_tu'"
+    tables_involved: ["products"]
+    sql_note: "Giá trị chính xác: 'Dien_tu'."
+    example_questions:
+      - "Doanh thu điện tử có bị ảnh hưởng bởi khuyến mãi không?"
+
+  # ─────────────────────────────────────────
+  # NHÓM 6: THỜI GIAN (Time Dimensions)
+  # ─────────────────────────────────────────
+
+  - id: THANG_NAY
+    term: "Tháng này"
+    aliases:
+      - "tháng hiện tại"
+      - "this month"
+      - "current month"
+      - "MTD"
+      - "month to date"
+    category: time_period
+    definition: "Khoảng thời gian từ đầu tháng hiện tại đến ngày hiện tại."
+    sql_filter: "strftime('%Y-%m', so.outputdate) = strftime('%Y-%m', 'now')"
+    tables_involved: ["sales_orders"]
+    sql_note: >
+      SQLite: strftime('%Y-%m', outputdate) = strftime('%Y-%m', 'now')
+      outputdate format: YYYY-MM-DD (ISO format trong v2).
+    example_questions:
+      - "Doanh thu tháng này?"
+      - "Top 10 sản phẩm bán chạy nhất tháng này?"
+
+  - id: THANG_TRUOC
+    term: "Tháng trước"
+    aliases:
+      - "last month"
+      - "tháng vừa rồi"
+      - "tháng qua"
+      - "previous month"
+    category: time_period
+    definition: "Khoảng thời gian trong tháng liền trước tháng hiện tại."
+    sql_filter: "strftime('%Y-%m', so.outputdate) = strftime('%Y-%m', date('now', '-1 month'))"
+    tables_involved: ["sales_orders"]
+    sql_note: "SQLite: date('now', '-1 month') lùi 1 tháng so với ngày hiện tại."
+    example_questions:
+      - "So sánh doanh thu tháng này và tháng trước?"
+
+  - id: QUY_NAY
+    term: "Quý này"
+    aliases:
+      - "quý hiện tại"
+      - "this quarter"
+      - "current quarter"
+      - "QTD"
+      - "quarter to date"
+    category: time_period
+    definition: >
+      Khoảng thời gian từ đầu quý hiện tại đến nay.
+      Q1: 01/01 - 31/03, Q2: 01/04 - 30/06, Q3: 01/07 - 30/09, Q4: 01/10 - 31/12.
+    sql_filter: >
+      CAST(strftime('%m', so.outputdate) AS INTEGER) BETWEEN
+        (((CAST(strftime('%m', 'now') AS INTEGER) - 1) / 3) * 3 + 1) AND
+        (((CAST(strftime('%m', 'now') AS INTEGER) - 1) / 3) * 3 + 3)
+      AND strftime('%Y', so.outputdate) = strftime('%Y', 'now')
+    tables_involved: ["sales_orders"]
+    sql_note: "SQLite không có hàm QUARTER() trực tiếp, cần tính từ tháng."
+    example_questions:
+      - "Doanh thu quý này so với quý trước?"
+      - "Tăng trưởng QoQ là bao nhiêu?"
+
+  - id: NAM_NAY
+    term: "Năm nay"
+    aliases:
+      - "năm hiện tại"
+      - "this year"
+      - "YTD"
+      - "year to date"
+    category: time_period
+    definition: "Khoảng thời gian từ đầu năm hiện tại đến ngày hiện tại."
+    sql_filter: "strftime('%Y', so.outputdate) = strftime('%Y', 'now')"
+    tables_involved: ["sales_orders"]
+    sql_note: "SQLite: strftime('%Y', outputdate) = strftime('%Y', 'now')."
+    example_questions:
+      - "Tổng doanh thu năm nay?"
+      - "Ngành hàng nào tăng trưởng mạnh nhất năm nay?"
+
+  # ─────────────────────────────────────────
+  # NHÓM 7: CHỈ SỐ TĂNG TRƯỞNG (Growth Metrics)
+  # ─────────────────────────────────────────
+
+  - id: TANG_TRUONG_MOM
+    term: "Tăng trưởng tháng"
+    aliases:
+      - "MoM growth"
+      - "tăng trưởng MoM"
+      - "so sánh tháng trước"
+      - "month over month"
+      - "tháng so với tháng"
+    category: metric
+    definition: >
+      Tỷ lệ tăng trưởng doanh thu tháng hiện tại so với tháng trước.
+      Công thức: (Doanh thu tháng này - Doanh thu tháng trước) / Doanh thu tháng trước × 100.
+    sql_formula: >
+      SELECT
+        strftime('%Y-%m', outputdate) AS thang,
+        SUM(net_revenue) AS doanh_thu,
+        LAG(SUM(net_revenue)) OVER (ORDER BY strftime('%Y-%m', outputdate)) AS thang_truoc,
+        ROUND((SUM(net_revenue) - LAG(SUM(net_revenue)) OVER (ORDER BY strftime('%Y-%m', outputdate))) * 100.0
+              / NULLIF(LAG(SUM(net_revenue)) OVER (ORDER BY strftime('%Y-%m', outputdate)), 0), 2) AS mom_growth_pct
+      FROM sales_orders WHERE is_gift = 0
+      GROUP BY thang ORDER BY thang
+    tables_involved: ["sales_orders"]
+    sql_note: "Dùng Window Function LAG(). SQLite hỗ trợ từ version 3.25.0."
+    example_questions:
+      - "Tăng trưởng doanh thu MoM theo từng tháng?"
+      - "Tháng nào có tăng trưởng mạnh nhất?"
+
+  - id: TANG_TRUONG_YOY
+    term: "Tăng trưởng năm"
+    aliases:
+      - "YoY growth"
+      - "tăng trưởng YoY"
+      - "so sánh năm ngoái"
+      - "year over year"
+      - "năm so với năm"
+    category: metric
+    definition: >
+      Tỷ lệ tăng trưởng doanh thu so với cùng kỳ năm ngoái.
+      Công thức: (Doanh thu năm nay - Doanh thu năm ngoái) / Doanh thu năm ngoái × 100.
+    sql_formula: >
+      Tương tự MoM nhưng nhóm theo năm và dùng LAG theo năm.
+    tables_involved: ["sales_orders"]
+    sql_note: "Cần có dữ liệu từ nhiều năm. Dataset hiện tại có 2025-2026."
+    example_questions:
+      - "Doanh thu năm 2026 so với 2025 tăng hay giảm?"
+
+  # ─────────────────────────────────────────
+  # NHÓM 8: QUAN HỆ BẢNG (JOIN Guidance)
+  # ─────────────────────────────────────────
+
+  - id: JOIN_SALES_CUSTOMERS
+    term: "Liên kết đơn hàng với khách hàng"
+    aliases:
+      - "join sales customers"
+      - "doanh thu theo khách hàng"
+      - "phân tích khách hàng"
+    category: join_guide
+    definition: "Cách JOIN bảng sales_orders với customers để phân tích theo khách hàng."
+    sql_formula: >
+      FROM sales_orders so
+      JOIN customers c ON so.customer_id = c.customer_id
+    tables_involved: ["sales_orders", "customers"]
+    sql_note: "Khóa ngoại: sales_orders.customer_id = customers.customer_id."
+    example_questions:
+      - "Doanh thu theo phân khúc khách hàng?"
+
+  - id: JOIN_SALES_PRODUCTS
+    term: "Liên kết đơn hàng với sản phẩm"
+    aliases:
+      - "join sales products"
+      - "doanh thu theo sản phẩm"
+      - "phân tích ngành hàng"
+    category: join_guide
+    definition: "Cách JOIN bảng sales_orders với products để phân tích theo ngành hàng."
+    sql_formula: >
+      FROM sales_orders so
+      JOIN products p ON so.product_id = p.product_id
+    tables_involved: ["sales_orders", "products"]
+    sql_note: "Khóa ngoại: sales_orders.product_id = products.product_id."
+    example_questions:
+      - "Doanh thu theo ngành hàng?"
+
+  - id: JOIN_SALES_PROMOTIONS
+    term: "Liên kết đơn hàng với khuyến mãi"
+    aliases:
+      - "join sales promotions"
+      - "doanh thu theo khuyến mãi"
+      - "phân tích khuyến mãi"
+    category: join_guide
+    definition: "Cách JOIN bảng sales_orders với promotions để phân tích hiệu quả khuyến mãi."
+    sql_formula: >
+      FROM sales_orders so
+      LEFT JOIN promotions pm ON so.promotionid = pm.promotionid
+    tables_involved: ["sales_orders", "promotions"]
+    sql_note: >
+      Dùng LEFT JOIN vì không phải đơn hàng nào cũng có khuyến mãi.
+      Khóa ngoại: sales_orders.promotionid = promotions.promotionid.
